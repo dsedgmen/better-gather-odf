@@ -163,7 +163,7 @@ $(BG_LOCALBIN)/%:
 .PHONY: bats-lint
 bats-lint: $(BG_SHELLCHECK)
 \tfind $(BG_SCRIPT_DIRS) -type f -not -path '*/vendor/*' \\
-\t\t-exec grep -Eq '^#!.*/(env +)?(ba|da|k|z)?sh\\b' {} \; -exec $(BG_SHELLCHECK) -x {} +
+\t\t-exec grep -Eq '^#!.*/(env +)?(ba|da|k|z)?sh\\b' {} \\; -exec $(BG_SHELLCHECK) -x {} +
 
 .PHONY: bats-test
 bats-test: $(BG_BATS)
