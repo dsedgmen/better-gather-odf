@@ -46,7 +46,9 @@ parse_since_time() {
     # everything oc itself can bound. Collection that copies whole
     # directories has to apply the window itself, and needs a fixed point to
     # compare mtimes against -- see since_common.sh.
-    # shellcheck source=collection-scripts/since_common.sh
+    # SC1091 as well as source=: the repo's own CI runs shellcheck without
+    # -x, so it cannot follow the file even when told where it is.
+    # shellcheck source=collection-scripts/since_common.sh disable=SC1091
     source "$(dirname "${BASH_SOURCE[0]}")/since_common.sh"
     get_since_cutoff
     since_report_header

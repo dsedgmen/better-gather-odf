@@ -8,7 +8,9 @@ BASE_COLLECTION_PATH=${BASE_COLLECTION_PATH:-"$(pwd)"}
 # not inherited -- utils.sh exports the few it shares with "export -f". Source
 # the window helpers here rather than relying on that. get_since_cutoff is
 # idempotent and reads the same environment the parent did.
-# shellcheck source=collection-scripts/since_common.sh
+# SC1091 as well as source=: the repo's own CI runs shellcheck without -x,
+# so it cannot follow the file even when told where it is.
+# shellcheck source=collection-scripts/since_common.sh disable=SC1091
 source "$(dirname "$0")/since_common.sh"
 get_since_cutoff
 CEPH_COLLECTION_PATH="${BASE_COLLECTION_PATH}/ceph_logs"
