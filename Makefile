@@ -70,16 +70,19 @@ tools-from-packages:
 $(LOCALBIN)/%:
 	./hack/tools-from-packages.sh $*
 
-.PHONY: test
-test: $(BATS)
+.PHONY: bats-test
+bats-test: $(BATS)
 	$(BATS) tests/*.bats
 
-.PHONY: lint
-lint: $(SHELLCHECK)
-	find $(SCRIPT_DIRS) -type f -exec grep -Eq '^#!/' {} \; -exec $(SHELLCHECK) -x {} +
+.PHONY: bats-lint
+bats-lint: $(SHELLCHECK)
+	find $(SCRIPT_DIRS) -type f -not -path '*/vendor/*' \
+		-exec grep -Eq '^#!/' {} \; -exec $(SHELLCHECK) -x {} +
 
-.PHONY: check
-check: lint test
+# Does not collide with upstream's targets or with build-machinery-go's
+# `test`, which attaches test-unit and hard-requires a Go toolchain.
+.PHONY: bats-check
+bats-check: bats-lint bats-test
 
 .PHONY: image-overlay
 image-overlay:
