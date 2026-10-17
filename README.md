@@ -76,6 +76,57 @@ dependency on a `common.sh` this repo does not have, or if a collection
 script calls a library function without sourcing the library — that last one
 fails silently on a cluster and cost a wasted run before it was caught.
 
+## Images
+
+CI builds the overlay image and pushes it to ghcr.io on `main`, on every
+`release-*` branch, and on a `v*` tag. Pull requests build and smoke-test but
+publish nothing.
+
+| ref | tags |
+| --- | --- |
+| `main` | `:latest`, `:main-<sha>` |
+| `release-4.18` | `:4.18`, `:release-4.18` |
+| `v1.2.3` | `:v1.2.3`, `:latest` |
+
+A release branch deliberately does not move `:latest`, so `--image …:4.18`
+keeps getting the 4.18 collection scripts whatever happens on main.
+
+**The packages are private**, inheriting the repository's visibility, so a
+cluster needs a pull secret. Create one in the namespace must-gather will run
+in, with a PAT that has `read:packages`:
+
+```console
+$ oc create namespace must-gather-run
+$ oc create secret docker-registry ghcr \
+    --docker-server=ghcr.io \
+    --docker-username=dsedgmen \
+    --docker-password=<PAT with read:packages> \
+    -n must-gather-run
+$ oc secrets link default ghcr --for=pull -n must-gather-run
+
+$ oc adm must-gather \
+    --run-namespace must-gather-run \
+    --image=ghcr.io/dsedgmen/better-gather-odf:4.18 \
+    --since 30m
+```
+
+`--run-namespace` matters: without it the pod runs in a fresh temporary
+namespace that has no pull secret.
+
+To avoid the secret entirely, make the package public in the repository's
+package settings — note that publishes the collection scripts, since they are
+in the image layers.
+
+## Release branches
+
+`release-4.18` through `release-4.22`. Upstream has no `release-4.23` —
+it goes straight from 4.22 to 5.0 — so there is nothing to backport onto.
+
+On each branch, 7 of the 9 `oc rsync` calls in `gather_ceph_logs` become
+bounded copies; the two that remain are the journal and kernel `.gz` files,
+already bounded by `journalctl --since` and single files besides. 40 tests
+pass on every branch.
+
 ## Staying current with upstream
 
 ```console
