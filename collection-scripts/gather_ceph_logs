@@ -3,6 +3,14 @@
 # Expect base collection path as an exported variable
 # If it is not defined, use PWD instead
 BASE_COLLECTION_PATH=${BASE_COLLECTION_PATH:-"$(pwd)"}
+
+# gather runs this as a separate script, so shell functions defined there are
+# not inherited -- utils.sh exports the few it shares with "export -f". Source
+# the window helpers here rather than relying on that. get_since_cutoff is
+# idempotent and reads the same environment the parent did.
+# shellcheck source=collection-scripts/since_common.sh
+source "$(dirname "$0")/since_common.sh"
+get_since_cutoff
 CEPH_COLLECTION_PATH="${BASE_COLLECTION_PATH}/ceph_logs"
 
 namespaces=$(oc get deploy --all-namespaces -o go-template --template='{{range .items}}{{if .metadata.labels}}{{printf "%s %v" .metadata.namespace (index .metadata.labels "olm.owner")}} {{printf "\n"}}{{end}}{{end}}' | grep -E 'ocs-operator|ocs-client-operator' | awk '{print $1}' | uniq)
@@ -11,42 +19,76 @@ for ns in $namespaces; do
     # Add Ready nodes to the list
     nodes=$(oc get nodes --no-headers | awk '/\yworker\y/{print $1}')
 
+# The debug pods are created by pre-install.sh and live for the whole gather
+# ("oc debug nodes/<node> -- sleep 100m"), so they can be exec'd into as well
+# as rsync'd from.
+debug_pod_for_node() {
+    # head -1: a node can have more than one debug pod if an earlier run left
+    # one behind, and returning two names turns every subsequent oc call into
+    # a confusing failure.
+    oc get pods -n "${ns}" --no-headers | grep "${1//./}-debug" | awk '{print $1}' | head -1
+}
+
+# Pull a log directory out of a node's debug pod, limited to the --since
+# window when one was requested.
+#
+# These used to be plain "oc rsync", which has no way to express a time
+# bound, so every run collected every log the node had ever kept. On a busy
+# Ceph cluster /var/log/ceph is the single largest thing this image collects.
+# copy_pod_dir_since streams a find|tar instead, so out-of-window files are
+# never transferred at all; with no window it falls back to a plain copy and
+# behaves exactly as before.
+rsync_node_dir_since() {
+    local node="$1" src="$2" dest="$3" label="$4"
+    copy_pod_dir_since "${ns}" "$(debug_pod_for_node "${node}")" "" \
+        "${src}" "${dest}" "ceph_logs/${label}_${node}"
+}
+
     # Collecting Ceph daemon logs
     ceph_daemon_log_collection() {
         dbglog "collecting Ceph daemon logs from node ${node}"
-        oc rsync -n "${ns}" "$(oc get pods -n "${ns}" --no-headers | grep "${node//./}-debug" | awk '{print $1}')":/host/var/lib/rook/"${ns}"/log "${CEPH_DAEMON_LOG_OUTPUT_DIR}"
+        rsync_node_dir_since "${node}" /host/var/lib/rook/"${ns}"/log "${CEPH_DAEMON_LOG_OUTPUT_DIR}" ceph_daemon_log
     }
 
     ceph_kernel_log_collection() {
         dbglog "collecting Ceph kernel logs from node ${node}"
-        oc rsync -n "${ns}" "$(oc get pods -n "${ns}" --no-headers | grep "${node//./}-debug" | awk '{print $1}')":/host/var/tmp/ceph_kernel_debug_"${node}"/ceph "${CEPH_KERNEL_LOG_OUTPUT_DIR}"
+        # Deliberately not time-filtered: this is a copy of /sys/kernel/debug/ceph
+        # taken moments ago in the loop below, so it is point-in-time state
+        # rather than history and a window does not apply to it.
+        oc rsync -n "${ns}" "$(debug_pod_for_node "${node}")":/host/var/tmp/ceph_kernel_debug_"${node}"/ceph "${CEPH_KERNEL_LOG_OUTPUT_DIR}"
+        since_report "ceph_logs/ceph_kernel_debug_${node}" "not-applicable-point-in-time" "all" "0"
     }
 
     # Collecting csi and ceph daemon logs
     csi_log_collection() {
         dbglog "collecting csi and ceph daemon logs from node ${node}"
         # as per the correction we are keeping both /var/lib/rook & /var/log/ceph for ceph pods, as to not break anything
-        oc rsync -n "${ns}" "$(oc get pods -n "${ns}" --no-headers | grep "${node//./}-debug" | awk '{print $1}')":/host/var/log/ceph/ "${CEPH_DAEMON_LOG_OUTPUT_DIR}"
-        oc rsync -n "${ns}" "$(oc get pods -n "${ns}" --no-headers | grep "${node//./}-debug" | awk '{print $1}')":/host/var/lib/rook/"${ns}".rbd.csi.ceph.com/log "${CSI_LOG_OUTPUT_DIR}"
-        oc rsync -n "${ns}" "$(oc get pods -n "${ns}" --no-headers | grep "${node//./}-debug" | awk '{print $1}')":/host/var/lib/rook/"${ns}".cephfs.csi.ceph.com/log "${CSI_LOG_OUTPUT_DIR}"
-        oc rsync -n "${ns}" "$(oc get pods -n "${ns}" --no-headers | grep "${node//./}-debug" | awk '{print $1}')":/host/var/lib/rook/"${ns}".nfs.csi.ceph.com/log "${CSI_LOG_OUTPUT_DIR}"
+        rsync_node_dir_since "${node}" /host/var/log/ceph/ "${CEPH_DAEMON_LOG_OUTPUT_DIR}" ceph_var_log
+        rsync_node_dir_since "${node}" /host/var/lib/rook/"${ns}".rbd.csi.ceph.com/log "${CSI_LOG_OUTPUT_DIR}" csi_rbd
+        rsync_node_dir_since "${node}" /host/var/lib/rook/"${ns}".cephfs.csi.ceph.com/log "${CSI_LOG_OUTPUT_DIR}" csi_cephfs
+        rsync_node_dir_since "${node}" /host/var/lib/rook/"${ns}".nfs.csi.ceph.com/log "${CSI_LOG_OUTPUT_DIR}" csi_nfs
     }
 
     # collect logs from the csi pods if csi is installed using csi-operator
     csi_operator_log_collection() {
         dbglog "collecting csi logs from node ${node}"
-        oc rsync -n "${ns}" "$(oc get pods -n "${ns}" --no-headers | grep "${node//./}-debug" | awk '{print $1}')":/host/var/lib/cephcsi "${CSI_LOG_OUTPUT_DIR}"
+        rsync_node_dir_since "${node}" /host/var/lib/cephcsi "${CSI_LOG_OUTPUT_DIR}" csi_operator
     }
 
     crash_collection() {
         dbglog "collecting crash logs from node ${node}"
-        oc rsync -n "${ns}" "$(oc get pods -n "${ns}" --no-headers | grep "${node//./}"-debug | awk '{print $1}')":/host/var/lib/rook/"${ns}"/crash/ "${CRASH_OUTPUT_DIR}"
+        rsync_node_dir_since "${node}" /host/var/lib/rook/"${ns}"/crash/ "${CRASH_OUTPUT_DIR}" crash
     }
 
     journal_collection() {
         dbglog "collecting journal logs from node ${node}"
-        oc rsync -n "${ns}" "$(oc get pods -n "${ns}" --no-headers | grep "${node//./}"-debug | awk '{print $1}')":/host/var/log/journal_"${node}".gz "${JOURNAL_OUTPUT_DIR}"
-        oc rsync -n "${ns}" "$(oc get pods -n "${ns}" --no-headers | grep "${node//./}"-debug | awk '{print $1}')":/host/var/log/kernel_"${node}".gz "${KERNEL_OUTPUT_DIR}"
+        # Already bounded: these two files were produced moments ago by
+        # "journalctl --since ${JCTL_FILTER_ARGS}" in the loop below, and they
+        # are single files rather than directories, so there is nothing more
+        # for a window to select between.
+        oc rsync -n "${ns}" "$(debug_pod_for_node "${node}")":/host/var/log/journal_"${node}".gz "${JOURNAL_OUTPUT_DIR}"
+        oc rsync -n "${ns}" "$(debug_pod_for_node "${node}")":/host/var/log/kernel_"${node}".gz "${KERNEL_OUTPUT_DIR}"
+        since_report "ceph_logs/journal_${node}" "journalctl --since" "2" "0"
     }
 
     for node in ${nodes}; do

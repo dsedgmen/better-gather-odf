@@ -1,3 +1,89 @@
+better-gather-odf
+=================
+
+A fork of [red-hat-storage/odf-must-gather](https://github.com/red-hat-storage/odf-must-gather)
+in which `--since` bounds the Ceph log collection. Sibling of
+[better-gather](https://github.com/dsedgmen/better-gather) (OpenShift) and
+[better-gather-cnv](https://github.com/dsedgmen/better-gather-cnv).
+
+## What was wrong
+
+ODF was in better shape than the OpenShift image to start with: `utils.sh
+parse_since_time()` already feeds `LOG_FILTER_ARGS` to thirteen `oc adm
+inspect` calls and `JCTL_FILTER_ARGS` to two `journalctl --since` calls. Both
+work.
+
+The gap was `gather_ceph_logs`, which pulled **ten whole host directories**
+out of per-node debug pods with `oc rsync` — `/var/log/ceph`,
+`/var/lib/rook/<ns>/log`, the three CSI log directories, `/var/lib/cephcsi`,
+crash dumps — with no time bound at all. `oc rsync` has no way to express
+one. On a busy cluster this is the single largest thing the image collects.
+
+## What changed
+
+Seven of those ten now go through `copy_pod_dir_since` from the vendored
+`since_common.sh`, which streams a `find -newermt | tar` out of the debug pod
+instead, so out-of-window files are never transferred. With no `--since` it
+falls back to a plain copy and behaves exactly as before.
+
+The other three are deliberate and annotated in place:
+
+- the two `journal_<node>.gz` / `kernel_<node>.gz` files are produced moments
+  earlier by `journalctl --since "${JCTL_FILTER_ARGS}"`, so they are already
+  bounded, and they are single files rather than directories;
+- the `ceph_kernel_debug` copy is a snapshot of `/sys/kernel/debug/ceph`
+  taken seconds before, so it is point-in-time state, not history.
+
+## Measured on a live cluster
+
+ODF 4.18.29 on OCP 4.18.54, three nodes, `--since 30m`:
+
+```
+baseline master-0: 64 files in /var/lib/rook/openshift-storage/log, 8 in window
+
+ceph_logs/ceph_daemon_log_master-0   find-newermt   kept=8   skipped=56
+ceph_logs/csi_rbd_master-0           find-newermt   kept=5   skipped=25
+ceph_logs/csi_cephfs_master-0        find-newermt   kept=1   skipped=15
+
+files collected older than the cutoff: 0
+```
+
+Every run writes `<base>/since-report.txt` accounting for each collection
+site, including the ones a window does not apply to, so nothing looks
+silently skipped.
+
+## Testing a change
+
+```console
+$ hack/try-on-cluster.sh --since 30m -- -cl      # ceph logs, no image build
+$ hack/try-on-cluster.sh --dry-run -- -cl
+$ make check                                      # shellcheck + bats
+$ make image-overlay BASE=<the odf must-gather image your cluster advertises>
+```
+
+`make check` bootstraps `bats`, `shellcheck` and `shfmt` from the
+distribution via `hack/tools-from-packages.sh`, with no root and no downloads
+from GitHub. `bats-support`/`bats-assert` are not packaged anywhere, so
+`tests/bats_assert_fallback.bash` supplies the assertions used here.
+
+## The vendored library
+
+`collection-scripts/since_common.sh` is a verbatim copy of the canonical file
+in [better-gather](https://github.com/dsedgmen/better-gather); update it with
+`hack/sync-since-lib.sh` *in that repo*, not by editing it here.
+`tests/vendored_lib.bats` fails if the copy has drifted, if it has grown a
+dependency on a `common.sh` this repo does not have, or if a collection
+script calls a library function without sourcing the library — that last one
+fails silently on a cluster and cost a wasted run before it was caught.
+
+## Staying current with upstream
+
+```console
+$ git fetch upstream && git rebase upstream/main
+```
+
+---
+
 ODF must-gather
 =================
 

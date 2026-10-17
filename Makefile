@@ -49,3 +49,38 @@ else
 	@make docker-engine-build
 endif
 
+
+# ---------------------------------------------------------------------------
+# better-gather-odf additions
+# ---------------------------------------------------------------------------
+
+LOCALBIN ?= $(shell pwd)/tmp/bin
+BATS ?= $(LOCALBIN)/bats
+SHELLCHECK ?= $(LOCALBIN)/shellcheck
+SHFMT ?= $(LOCALBIN)/shfmt
+SCRIPT_DIRS := collection-scripts/ hack/ tests/
+
+BASE ?= registry.redhat.io/odf4/odf-must-gather-rhel9:latest
+OVERLAY_IMAGE ?= better-gather-odf:latest
+
+.PHONY: tools-from-packages
+tools-from-packages:
+	./hack/tools-from-packages.sh
+
+$(LOCALBIN)/%:
+	./hack/tools-from-packages.sh $*
+
+.PHONY: test
+test: $(BATS)
+	$(BATS) tests/*.bats
+
+.PHONY: lint
+lint: $(SHELLCHECK)
+	find $(SCRIPT_DIRS) -type f -exec grep -Eq '^#!/' {} \; -exec $(SHELLCHECK) -x {} +
+
+.PHONY: check
+check: lint test
+
+.PHONY: image-overlay
+image-overlay:
+	podman build --build-arg BASE=$(BASE) -t $(OVERLAY_IMAGE) -f Dockerfile.overlay .
