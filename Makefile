@@ -77,7 +77,7 @@ bats-test: $(BATS)
 .PHONY: bats-lint
 bats-lint: $(SHELLCHECK)
 	find $(SCRIPT_DIRS) -type f -not -path '*/vendor/*' \
-		-exec grep -Eq '^#!/' {} \; -exec $(SHELLCHECK) -x {} +
+		-exec grep -Eq '^#!.*/(env +)?(ba|da|k|z)?sh\b' {} \; -exec $(SHELLCHECK) -x {} +
 
 # Does not collide with upstream's targets or with build-machinery-go's
 # `test`, which attaches test-unit and hard-requires a Go toolchain.
