@@ -3,39 +3,68 @@
 # Expect base collection path as an exported variable
 # If it is not defined, use PWD instead
 BASE_COLLECTION_PATH=${BASE_COLLECTION_PATH:-"$(pwd)"}
+
+# gather runs this as a separate script, so shell functions defined
+# there are not inherited.
+# shellcheck source=collection-scripts/since_common.sh disable=SC1091
+source "$(dirname "$0")/since_common.sh"
+get_since_cutoff
 CEPH_COLLECTION_PATH="${BASE_COLLECTION_PATH}/ceph_logs"
 
 namespaces=$(oc get deploy --all-namespaces -o go-template --template='{{range .items}}{{if .metadata.labels}}{{printf "%s %v" .metadata.namespace (index .metadata.labels "olm.owner")}} {{printf "\n"}}{{end}}{{end}}' | grep -E 'ocs-operator|ocs-client-operator' | awk '{print $1}' | uniq)
 # Inspecting the namespace where ocs-cluster is installed
 for ns in $namespaces; do
     # Add Ready nodes to the list
+
+# The debug pods are created by pre-install.sh and live for the whole gather,
+# so they can be exec'd into as well as rsync'd from.
+debug_pod_for_node() {
+    # head -1: a node can have more than one debug pod if an earlier run left
+    # one behind, and returning two names turns every subsequent oc call into
+    # a confusing failure.
+    oc get pods -n "${ns}" --no-headers | grep "${1//./}-debug" | awk '{print $1}' | head -1
+}
+
+# Pull a log directory out of a node's debug pod, limited to the --since
+# window when one was requested.
+#
+# These used to be plain "oc rsync", which has no way to express a time
+# bound, so every run collected every log the node had ever kept. On a busy
+# Ceph cluster /var/log/ceph is the single largest thing this image collects.
+# copy_pod_dir_since streams a find|tar instead, so out-of-window files are
+# never transferred; with no window it falls back to a plain copy.
+rsync_node_dir_since() {
+    local node="$1" src="$2" dest="$3" label="$4"
+    copy_pod_dir_since "${ns}" "$(debug_pod_for_node "${node}")" "" \
+        "${src}" "${dest}" "ceph_logs/${label}_${node}"
+}
     nodes=$(oc get nodes --no-headers | awk '/\yworker\y/{print $1}')
 
     # Collecting Ceph daemon logs
     ceph_daemon_log_collection() {
         dbglog "collecting Ceph daemon logs from node ${node}"
-        oc rsync -n "${ns}" "$(oc get pods -n "${ns}" --no-headers | grep "${node//./}-debug" | awk '{print $1}')":/host/var/lib/rook/"${ns}"/log "${CEPH_DAEMON_LOG_OUTPUT_DIR}"
+        rsync_node_dir_since "${node}" /host/var/lib/rook/"${ns}"/log "${CEPH_DAEMON_LOG_OUTPUT_DIR}" ceph_daemon_log
     }
 
     # Collecting csi and ceph daemon logs
     csi_log_collection() {
         dbglog "collecting csi and ceph daemon logs from node ${node}"
         # as per the correction we are keeping both /var/lib/rook & /var/log/ceph for ceph pods, as to not break anything
-        oc rsync -n "${ns}" "$(oc get pods -n "${ns}" --no-headers | grep "${node//./}-debug" | awk '{print $1}')":/host/var/log/ceph/ "${CEPH_DAEMON_LOG_OUTPUT_DIR}"
-        oc rsync -n "${ns}" "$(oc get pods -n "${ns}" --no-headers | grep "${node//./}-debug" | awk '{print $1}')":/host/var/lib/rook/"${ns}".rbd.csi.ceph.com/log "${CSI_LOG_OUTPUT_DIR}"
-        oc rsync -n "${ns}" "$(oc get pods -n "${ns}" --no-headers | grep "${node//./}-debug" | awk '{print $1}')":/host/var/lib/rook/"${ns}".cephfs.csi.ceph.com/log "${CSI_LOG_OUTPUT_DIR}"
-        oc rsync -n "${ns}" "$(oc get pods -n "${ns}" --no-headers | grep "${node//./}-debug" | awk '{print $1}')":/host/var/lib/rook/"${ns}".nfs.csi.ceph.com/log "${CSI_LOG_OUTPUT_DIR}"
+        rsync_node_dir_since "${node}" /host/var/log/ceph/ "${CEPH_DAEMON_LOG_OUTPUT_DIR}" ceph_daemon_log
+        rsync_node_dir_since "${node}" /host/var/lib/rook/"${ns}".rbd.csi.ceph.com/log "${CSI_LOG_OUTPUT_DIR}" csi_log
+        rsync_node_dir_since "${node}" /host/var/lib/rook/"${ns}".cephfs.csi.ceph.com/log "${CSI_LOG_OUTPUT_DIR}" csi_log
+        rsync_node_dir_since "${node}" /host/var/lib/rook/"${ns}".nfs.csi.ceph.com/log "${CSI_LOG_OUTPUT_DIR}" csi_log
     }
 
     # collect logs from the csi pods if csi is installed using csi-operator
     csi_operator_log_collection() {
         dbglog "collecting csi logs from node ${node}"
-        oc rsync -n "${ns}" "$(oc get pods -n "${ns}" --no-headers | grep "${node//./}-debug" | awk '{print $1}')":/host/var/lib/cephcsi "${CSI_LOG_OUTPUT_DIR}"
+        rsync_node_dir_since "${node}" /host/var/lib/cephcsi "${CSI_LOG_OUTPUT_DIR}" csi_log
     }
 
     crash_collection() {
         dbglog "collecting crash logs from node ${node}"
-        oc rsync -n "${ns}" "$(oc get pods -n "${ns}" --no-headers | grep "${node//./}"-debug | awk '{print $1}')":/host/var/lib/rook/"${ns}"/crash/ "${CRASH_OUTPUT_DIR}"
+        rsync_node_dir_since "${node}" /host/var/lib/rook/"${ns}"/crash/ "${CRASH_OUTPUT_DIR}" crash
     }
 
     journal_collection() {
