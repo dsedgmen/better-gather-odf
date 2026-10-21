@@ -1,22 +1,45 @@
 # Layer better-gather-odf's collection scripts onto an existing ODF
 # must-gather image.
 #
-# The upstream Dockerfile builds from registry.ci.openshift.org, which needs
-# CI credentials. For testing against a real cluster it is simpler and more
-# faithful to overlay onto the image that cluster's ODF operator already
-# advertises, so the base is version-matched and pullable:
+# BASE is deliberately not defaulted. This image adds nothing but shell
+# scripts -- no packages, no binaries -- so every CVE it carries comes from
+# whatever it is layered on, and a default would be the wrong answer most of
+# the time. quay.io/ocs-dev/ocs-must-gather:latest was built 2025-07-02 and
+# has no fresher tag; building on it is how a scan ends up far worse than a
+# stock must-gather. The supported image,
+# registry.redhat.io/odf4/odf-must-gather-rhel9, needs a subscription, and
+# upstream's own Dockerfile builds from registry.ci.openshift.org, which
+# needs CI credentials.
 #
-#   make image-overlay BASE=$(oc get csv -n openshift-storage \
-#       -o jsonpath='{.items[?(@.metadata.name=="ocs-operator.v4.18.29-rhodf")]...}')
+# The right base is the image your cluster already runs, which carries
+# exactly the CVEs you have already accepted and nothing more:
 #
-# Note this image deliberately has no jq (see the upstream Dockerfile), so
-# trim_jsonl_since is a no-op here. ODF collects no JSON-lines audit logs, so
-# nothing depends on it.
+#   oc get csv -n openshift-storage -o json \
+#     | jq -r '..|.["operators.openshift.io/must-gather-image"]? // empty'
+#
+#   make image-overlay BASE=<that image>
+#
+# Failing that, build a current one from UBI9 -- see Dockerfile.base:
+#
+#   make image-base
+#   make image-overlay BASE=better-gather-odf-base:latest
+#
+# Note the supported ODF image deliberately ships no jq (see the upstream
+# Dockerfile), so trim_jsonl_since is a no-op when layered onto it. ODF
+# collects no JSON-lines audit logs, so nothing depends on it. Dockerfile.base
+# does install jq, since gather_ceph_resources uses it.
+#
+# Either way the result is labelled with the base it used and when that base
+# was built, so it is never a mystery what a scan is actually reporting on.
 
-ARG BASE=registry.redhat.io/odf4/odf-must-gather-rhel9:latest
+ARG BASE
 FROM ${BASE}
 
 COPY collection-scripts/ /usr/bin/
 
+ARG BASE
+ARG BASE_BUILT="unknown"
 LABEL io.k8s.display-name="better-gather-odf" \
-      io.k8s.description="ODF must-gather collection scripts that honour --since"
+      io.k8s.description="ODF must-gather collection scripts that honour --since" \
+      better-gather.base="${BASE}" \
+      better-gather.base-built="${BASE_BUILT}"
