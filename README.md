@@ -1,3 +1,25 @@
+better-gather-odf (release-4.20)
+================================
+
+A fork of [red-hat-storage/odf-must-gather](https://github.com/red-hat-storage/odf-must-gather)
+in which `--since` bounds the Ceph log collection, branched for ODF
+4.20.
+
+> ### ⚠️ Not a Red Hat product
+>
+> This is a personal, unofficial fork. It is **not built, reviewed, supported
+> or endorsed by Red Hat**, and it is provided **without warranty or support
+> of any kind** — use it, and anything it collects, at your own risk. See
+> [`LICENSE`](LICENSE) and [`DISCLAIMER`](DISCLAIMER), a copy of which ships
+> in the image and is written into every collection it produces.
+>
+> Because `--since` really does bound collection here, an archive from this
+> tool may hold less than a stock ODF must-gather would. If you attach one to
+> a Red Hat support case, say that it came from an unofficial tool; support
+> may ask for a collection from the supported image instead.
+
+Upstream's README follows below, unchanged.
+
 ODF must-gather
 =================
 
