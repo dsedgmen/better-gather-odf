@@ -134,6 +134,19 @@ fi
 export BASE_COLLECTION_PATH="must-gather"
 mkdir -p ${BASE_COLLECTION_PATH}
 
+# Say whose tool this is, in the run output and in the archive. Whoever ends
+# up reading the collection is rarely whoever ran it, and nothing else in a
+# must-gather tarball would tell them it did not come from the supported
+# image. After the mkdir above, and after the --help path has exited, so a
+# plain `gather -h` does not leave a directory behind. Not fatal if the file
+# is missing: someone may have assembled an image without it.
+if [ -r /usr/share/better-gather-odf/DISCLAIMER ]; then
+    cat /usr/share/better-gather-odf/DISCLAIMER >&2
+    cp /usr/share/better-gather-odf/DISCLAIMER "${BASE_COLLECTION_PATH}/DISCLAIMER"
+else
+    echo "WARNING: better-gather-odf is not a Red Hat product and is unsupported." >&2
+fi
+
 # Source the utils
 # shellcheck disable=SC1091
 . utils.sh
