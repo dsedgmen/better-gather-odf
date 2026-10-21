@@ -56,7 +56,13 @@ BG_LOCALBIN ?= $(shell pwd)/tmp/bin
 BG_BATS ?= $(BG_LOCALBIN)/bats
 BG_SHELLCHECK ?= $(BG_LOCALBIN)/shellcheck
 BG_SCRIPT_DIRS := collection-scripts/ hack/ tests/
-BG_BASE ?= quay.io/ocs-dev/ocs-must-gather:latest
+# BG_BASE has no default on purpose. This image adds only shell scripts,
+# so all of its CVE exposure comes from whatever it is layered on, and the
+# public ODF must-gather image has not been rebuilt since July last year.
+# Pass the image your cluster advertises, or build one with image-base.
+BG_BASE ?=
+BG_BASE_IMAGE ?= better-gather-odf-base:4.21
+BG_MAX_BASE_AGE_DAYS ?= 60
 BG_IMAGE ?= better-gather-odf:latest
 
 $(BG_LOCALBIN)/%:
@@ -74,6 +80,18 @@ bats-test: $(BG_BATS)
 .PHONY: bats-check
 bats-check: bats-lint bats-test
 
+.PHONY: image-base
+image-base:
+	podman build -t $(BG_BASE_IMAGE) -f Dockerfile.base .
+
+.PHONY: check-base
+check-base:
+	@test -n "$(BG_BASE)" || { echo "set BG_BASE to the ODF must-gather image your cluster advertises, or build a 4.21 one with make image-base"; exit 2; }
+	./hack/check-base.sh --max-age $(BG_MAX_BASE_AGE_DAYS) $(BG_BASE)
+
 .PHONY: image-overlay
 image-overlay:
-	podman build --build-arg BASE=$(BG_BASE) -t $(BG_IMAGE) -f Dockerfile.overlay .
+	@test -n "$(BG_BASE)" || { echo "set BG_BASE to the ODF must-gather image your cluster advertises, or build a 4.21 one with make image-base"; exit 2; }
+	podman build --build-arg BASE=$(BG_BASE) \
+		--build-arg BASE_BUILT="$$(./hack/check-base.sh --warn-only $(BG_BASE) 2>/dev/null | sed -n 's/^built: \([0-9-]*\).*/\1/p' | grep . || echo unknown)" \
+		-t $(BG_IMAGE) -f Dockerfile.overlay .
