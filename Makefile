@@ -60,8 +60,15 @@ SHELLCHECK ?= $(LOCALBIN)/shellcheck
 SHFMT ?= $(LOCALBIN)/shfmt
 SCRIPT_DIRS := collection-scripts/ hack/ tests/
 
-BASE ?= registry.redhat.io/odf4/odf-must-gather-rhel9:latest
+# BASE has no default on purpose. This image adds only shell scripts, so all
+# of its CVE exposure comes from whatever it is layered on; the supported ODF
+# image needs a subscription and the community one was built in July last
+# year. Pass the image your cluster advertises, or build a current one with
+# image-base.
+BASE ?=
 OVERLAY_IMAGE ?= better-gather-odf:latest
+BASE_IMAGE ?= better-gather-odf-base:latest
+MAX_BASE_AGE_DAYS ?= 60
 
 .PHONY: tools-from-packages
 tools-from-packages:
@@ -84,6 +91,18 @@ bats-lint: $(SHELLCHECK)
 .PHONY: bats-check
 bats-check: bats-lint bats-test
 
+.PHONY: image-base
+image-base:
+	podman build -t $(BASE_IMAGE) -f Dockerfile.base .
+
+.PHONY: check-base
+check-base:
+	@test -n "$(BASE)" || { echo "set BASE to the image your cluster advertises, or build one with make image-base"; exit 2; }
+	./hack/check-base.sh --max-age $(MAX_BASE_AGE_DAYS) $(BASE)
+
 .PHONY: image-overlay
 image-overlay:
-	podman build --build-arg BASE=$(BASE) -t $(OVERLAY_IMAGE) -f Dockerfile.overlay .
+	@test -n "$(BASE)" || { echo "set BASE to the image your cluster advertises, or build one with make image-base"; exit 2; }
+	podman build --build-arg BASE=$(BASE) \
+		--build-arg BASE_BUILT="$$(./hack/check-base.sh --warn-only $(BASE) 2>/dev/null | sed -n 's/^built: \([0-9-]*\).*/\1/p' | grep . || echo unknown)" \
+		-t $(OVERLAY_IMAGE) -f Dockerfile.overlay .
