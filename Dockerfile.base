@@ -1,0 +1,85 @@
+# A current base for the ODF must-gather overlay.
+#
+# The published image used to layer onto quay.io/ocs-dev/ocs-must-gather:latest,
+# which was last rebuilt over a year ago. Dockerfile.overlay adds only shell
+# scripts, so every vulnerability a scan reported against it came from that
+# base and none of it from us.
+#
+# Upstream's own Dockerfile builds FROM registry.ci.openshift.org, which needs
+# CI credentials nobody outside OpenShift CI has, and the supported image
+# (registry.redhat.io/odf4/odf-must-gather-rhel9) needs a subscription. So
+# reproduce what those images provide -- oc, the pod template and the CNSA
+# default -- on top of UBI9 minimal, which Red Hat rebuilds continuously and
+# which needs no pull credentials.
+#
+#   make image-base
+#   make image-overlay BASE=better-gather-odf-base:latest
+#
+# This is for the published, cluster-agnostic image. If you are collecting
+# from a cluster you have access to, prefer layering onto the ODF must-gather
+# image that cluster's operator already advertises -- it carries exactly the
+# CVEs you have already accepted, and its tooling matches the ODF release you
+# run.
+
+ARG UBI=registry.access.redhat.com/ubi9/ubi-minimal:latest
+FROM ${UBI}
+
+# stable tracks the current oc release; pin to e.g. 4.18.21 to match a cluster.
+ARG OC_VERSION=stable-4.19
+# Set automatically per platform by buildx and by podman. Deliberately
+# undefaulted: a default wins over the value the builder supplies, which
+# silently unpacks an x86_64 oc into an arm64 image. uname -m is the fallback
+# for a builder that sets neither.
+ARG TARGETARCH
+
+# What the collection scripts need:
+#   tar gzip        archive handling, and oc cp/rsync require tar in the image
+#   rsync           the three oc rsync sites copy_pod_dir_since does not cover
+#   findutils       find, including -newermt for the --since window
+#   util-linux      flock, and column for formatted output
+#   procps-ng       pkill, used by oc's own disk-usage checker
+#   gawk sed grep   text handling throughout
+#   tzdata          so date -d and timestamps resolve sensibly
+#
+# jq is deliberately absent from the supported ODF image -- its Dockerfile
+# says so -- even though gather_ceph_resources uses it. Install it here: this
+# base is ours to decide, and a script that silently degrades is worse than
+# one that works. Anything written against it must still cope without jq, so
+# that overlaying onto a real ODF image behaves the same.
+RUN microdnf install -y --nodocs --setopt=install_weak_deps=0 \
+        tar gzip jq rsync findutils util-linux procps-ng gawk sed grep \
+        curl-minimal ca-certificates tzdata bash \
+    && microdnf clean all \
+    && rm -rf /var/cache/yum
+
+RUN set -eux; \
+    want="${TARGETARCH:-$(uname -m)}"; \
+    case "${want}" in \
+        amd64 | x86_64)  arch=x86_64  ;; \
+        arm64 | aarch64) arch=arm64   ;; \
+        s390x)           arch=s390x   ;; \
+        ppc64le)         arch=ppc64le ;; \
+        *) echo "unsupported architecture: ${want}" >&2; exit 1 ;; \
+    esac; \
+    curl -sSLf --retry 3 \
+        "https://mirror.openshift.com/pub/openshift-v4/${arch}/clients/ocp/${OC_VERSION}/openshift-client-linux.tar.gz" \
+        | tar xz -C /usr/bin oc kubectl; \
+    chmod +x /usr/bin/oc /usr/bin/kubectl; \
+    oc version --client
+
+# pre-install.sh reads this at /templates/pod.template.
+COPY templates /templates
+
+# gather_cnsa defaults to this when the caller does not override it. Kept at
+# the value upstream's Dockerfile sets so the two images agree.
+ENV CNSA_MG_IMAGE="icr.io/cpopen/ibm-spectrum-scale-must-gather:v6.0.1.0"
+
+# must-gather runs with / as the working directory: the collection scripts
+# mix 'must-gather' and '../must-gather' relative paths, which only agree
+# from there.
+WORKDIR /
+
+LABEL io.k8s.display-name="better-gather-odf-base" \
+      io.k8s.description="Current UBI9 base carrying what the ODF must-gather collection scripts use"
+
+ENTRYPOINT ["/bin/bash"]
