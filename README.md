@@ -270,8 +270,23 @@ pass on every branch.
 
 ## Staying current with upstream
 
+A scheduled workflow (`.github/workflows/sync-upstream.yml`) fetches
+[red-hat-storage/odf-must-gather](https://github.com/red-hat-storage/odf-must-gather)
+daily and:
+
+- opens a sync PR when `main` lags `upstream/main`
+- opens a sync PR for each existing `release-*` that lags its upstream twin
+  (full re-apply of --since, UBI9 base, and disclaimer — not a cherry-pick)
+- publishes a new `release-X.Y` when upstream adds one at or above this fork's
+  floor (oldest existing `release-*`, today 4.18), after a successful full
+  backport — never a bare upstream push
+
+Sync PRs are labeled `upstream-sync` and wait for CI; they are not auto-merged.
+Run the same logic locally with:
+
 ```console
-$ git fetch upstream && git rebase upstream/main
+$ hack/sync-upstream.sh           # needs gh, a clean tree, and push access
+$ hack/sync-upstream.sh --dry-run
 ```
 
 ---
