@@ -41,6 +41,18 @@ dbglogf() {
 parse_since_time() {
     local FILTER_ARGS=""
 
+    # Resolve the window to an absolute instant as well. LOG_FILTER_ARGS and
+    # JCTL_FILTER_ARGS below cover oc adm inspect and journalctl, which is
+    # everything oc itself can bound. Collection that copies whole
+    # directories has to apply the window itself, and needs a fixed point to
+    # compare mtimes against -- see since_common.sh.
+    # SC1091 as well as source=: the repo's own CI runs shellcheck without
+    # -x, so it cannot follow the file even when told where it is.
+    # shellcheck source=collection-scripts/since_common.sh disable=SC1091
+    source "$(dirname "${BASH_SOURCE[0]}")/since_common.sh"
+    get_since_cutoff
+    since_report_header
+
     # We do not need to validate the values here, they are validated
     # by the oc cli.
     # Ref: https://github.com/openshift/oc/commit/1fc5c7d79ff5c2fa19c35b7a004dc99eb3330806

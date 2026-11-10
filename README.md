@@ -1,3 +1,296 @@
+better-gather-odf
+=================
+
+A fork of [red-hat-storage/odf-must-gather](https://github.com/red-hat-storage/odf-must-gather)
+in which `--since` bounds the Ceph log collection. Sibling of
+[better-gather](https://github.com/dsedgmen/better-gather) (OpenShift) and
+[better-gather-cnv](https://github.com/dsedgmen/better-gather-cnv).
+
+> ### ⚠️ Not a Red Hat product
+>
+> This is a personal, unofficial fork. It is **not built, reviewed, supported
+> or endorsed by Red Hat**, and it is provided **without warranty or support
+> of any kind** — use it, and anything it collects, at your own risk. See
+> [`LICENSE`](LICENSE) and [`DISCLAIMER`](DISCLAIMER), a copy of which ships
+> in the image and is written into every collection it produces.
+>
+> Because `--since` really does bound collection here, an archive from this
+> tool may hold less than a stock ODF must-gather would. If you attach one to a
+> Red Hat support case, say that it came from an unofficial tool; support may
+> ask for a collection from the supported image instead.
+
+## What was wrong
+
+ODF was in better shape than the OpenShift image to start with: `utils.sh
+parse_since_time()` already feeds `LOG_FILTER_ARGS` to thirteen `oc adm
+inspect` calls and `JCTL_FILTER_ARGS` to two `journalctl --since` calls. Both
+work.
+
+The gap was `gather_ceph_logs`, which pulled **ten whole host directories**
+out of per-node debug pods with `oc rsync` — `/var/log/ceph`,
+`/var/lib/rook/<ns>/log`, the three CSI log directories, `/var/lib/cephcsi`,
+crash dumps — with no time bound at all. `oc rsync` has no way to express
+one. On a busy cluster this is the single largest thing the image collects.
+
+## What changed
+
+Seven of those ten now go through `copy_pod_dir_since` from the vendored
+`since_common.sh`, which streams a `find -newermt | tar` out of the debug pod
+instead, so out-of-window files are never transferred. With no `--since` it
+falls back to a plain copy and behaves exactly as before.
+
+The other three are deliberate and annotated in place:
+
+- the two `journal_<node>.gz` / `kernel_<node>.gz` files are produced moments
+  earlier by `journalctl --since "${JCTL_FILTER_ARGS}"`, so they are already
+  bounded, and they are single files rather than directories;
+- the `ceph_kernel_debug` copy is a snapshot of `/sys/kernel/debug/ceph`
+  taken seconds before, so it is point-in-time state, not history.
+
+## Measured on a live cluster
+
+ODF 4.18.29 on OCP 4.18.54, three nodes, `--since 30m`:
+
+```
+baseline master-0: 64 files in /var/lib/rook/openshift-storage/log, 8 in window
+
+ceph_logs/ceph_daemon_log_master-0   find-newermt   kept=8   skipped=56
+ceph_logs/csi_rbd_master-0           find-newermt   kept=5   skipped=25
+ceph_logs/csi_cephfs_master-0        find-newermt   kept=1   skipped=15
+
+files collected older than the cutoff: 0
+```
+
+Every run writes `<base>/since-report.txt` accounting for each collection
+site, including the ones a window does not apply to, so nothing looks
+silently skipped.
+
+## Testing a change
+
+```console
+$ hack/try-on-cluster.sh --since 30m -- -cl      # ceph logs, no image build
+$ hack/try-on-cluster.sh --dry-run -- -cl
+$ make check                                      # shellcheck + bats
+$ make image-overlay BASE=<the odf must-gather image your cluster advertises>
+```
+
+`make check` bootstraps `bats`, `shellcheck` and `shfmt` from the
+distribution via `hack/tools-from-packages.sh`, with no root and no downloads
+from GitHub. `bats-support`/`bats-assert` are not packaged anywhere, so
+`tests/bats_assert_fallback.bash` supplies the assertions used here.
+
+## The vendored library
+
+`collection-scripts/since_common.sh` is a verbatim copy of the canonical file
+in [better-gather](https://github.com/dsedgmen/better-gather); update it with
+`hack/sync-since-lib.sh` *in that repo*, not by editing it here.
+`tests/vendored_lib.bats` fails if the copy has drifted, if it has grown a
+dependency on a `common.sh` this repo does not have, or if a collection
+script calls a library function without sourcing the library — that last one
+fails silently on a cluster and cost a wasted run before it was caught.
+
+## Images
+
+This image adds **only shell scripts** — no packages, no binaries — so every
+vulnerability it reports comes from whatever it is layered on. That makes the
+choice of base the whole of its security posture, and `Dockerfile.overlay`
+deliberately has no default: a build without `BASE` fails rather than
+silently picking something stale.
+
+### The best base is the one your cluster already runs
+
+It carries exactly the CVEs you have already accepted, and its tooling
+matches the ODF release you run:
+
+```console
+$ BASE=$(oc get csv -n openshift-storage -o json \
+    | jq -r '..|.["operators.openshift.io/must-gather-image"]? // empty' | head -1)
+$ make image-overlay BASE="$BASE"
+```
+
+That is the `operators.openshift.io/must-gather-image` annotation, the same
+one `oc adm must-gather --all-images` reads. Not every operator build sets
+it; if it comes back empty, take the image from the operator's own
+deployment instead.
+
+Or build it inside the cluster, which needs no registry credentials at all:
+
+```console
+$ oc new-project better-gather-build
+$ oc new-build --name mg --binary --strategy=docker
+$ oc start-build mg --from-dir=. --follow
+```
+
+A scan of that image is identical to a scan of the must-gather you are
+already running. No prebuilt image can do better.
+
+### The published images
+
+For when you do not have the cluster to hand, CI publishes images built on a
+base this repo produces from `registry.access.redhat.com/ubi9/ubi-minimal`,
+which Red Hat rebuilds continuously and which needs no pull credentials:
+
+```console
+$ make image-base                                      # the UBI9 base
+$ make image-overlay BASE=better-gather-odf-base:latest
+```
+
+`Dockerfile.base` reproduces what the upstream image provides — `oc`, the pod template and the CNSA default — on top
+of UBI9, because there is nothing fresher to layer onto — `latest` is the
+newest tag the community images publish, and at the time of writing:
+
+| base | last rebuilt |
+| ---- | ------------ |
+| `quay.io/openshift/origin-must-gather:latest` | 2026-02-13 |
+| `quay.io/kubevirt/must-gather:latest` | 2026-07-06 |
+| `quay.io/ocs-dev/ocs-must-gather:latest` | 2025-07-02 |
+| `registry.access.redhat.com/ubi9/ubi-minimal:latest` | rebuilt continuously |
+
+`hack/check-base.sh` reports how old a base is and fails past 60 days, and CI
+runs it before publishing, so this cannot quietly rot again. Every image
+carries `better-gather.base` and `better-gather.base-built` labels recording
+what it was built on, so a scan result is never a mystery.
+
+The UBI9 base is smaller too — 283 MB against 447 MB.
+
+### Tags
+
+CI builds the overlay image and pushes it to ghcr.io on `main`, on every
+`release-*` branch, and on a `v*` tag. Pull requests build and smoke-test but
+publish nothing.
+
+| ref | tags |
+| --- | --- |
+| `main` | `:latest`, `:main-<sha>` |
+| `release-4.18` | `:4.18`, `:release-4.18` |
+| `v1.2.3` | `:v1.2.3`, `:latest` |
+
+A release branch deliberately does not move `:latest`, so `--image …:4.18`
+keeps getting the 4.18 collection scripts whatever happens on main.
+
+**The packages are private**, inheriting the repository's visibility, so a
+cluster needs a pull secret — or one of the two ways round it below.
+
+### With a pull secret
+
+`--run-namespace` needs an **already privileged** namespace — the flag's own
+help says so, and it matters more than it sounds. When `oc` creates its own
+temporary namespace it also creates a ClusterRoleBinding granting
+`cluster-admin` to that namespace's `default` ServiceAccount, and labels the
+namespace for privileged pod security. With `--run-namespace` it does
+neither: it only looks the namespace up
+([`mustgather.go`](https://github.com/openshift/oc/blob/master/pkg/cli/admin/mustgather/mustgather.go),
+`getNamespace`). A plain `oc create namespace` therefore fails partway
+through collection with:
+
+```
+Error from server (Forbidden): csistoragecapacities.storage.k8s.io is forbidden:
+User "system:serviceaccount:must-gather-run:default" cannot list resource ...
+```
+
+Create it with the same labels and binding `oc` would have made:
+
+```console
+$ cat <<'EOF' | oc apply -f -
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: must-gather-run
+  labels:
+    openshift.io/run-level: "0"
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+    security.openshift.io/scc.podSecurityLabelSync: "false"
+  annotations:
+    openshift.io/node-selector: ""
+EOF
+
+$ oc adm policy add-cluster-role-to-user cluster-admin -z default -n must-gather-run
+```
+
+The token for the pull secret must be a **classic** personal access token.
+GitHub's own documentation is explicit: *"GitHub Packages only supports
+authentication using a personal access token (classic)."* Fine-grained
+tokens are not accepted by ghcr.io at all, and have no `read:packages` scope
+to select — if you are looking at a scope list without it, you are on the
+fine-grained page.
+
+Settings → Developer settings → Personal access tokens → **Tokens (classic)**
+→ Generate new token (classic) → tick **`read:packages`**.
+
+```console
+$ oc create secret docker-registry ghcr \
+    --docker-server=ghcr.io \
+    --docker-username=dsedgmen \
+    --docker-password=<classic PAT with read:packages> \
+    -n must-gather-run
+$ oc secrets link default ghcr --for=pull -n must-gather-run
+
+$ oc adm must-gather \
+    --run-namespace must-gather-run \
+    --image=ghcr.io/dsedgmen/better-gather-odf:4.18 \
+    --since 30m
+```
+
+Verified on a 4.18 cluster: with the namespace made this way a run completes
+with no Forbidden errors; with a bare `oc create namespace` it does not.
+
+### Without a token at all
+
+**Make the package public** — repository → Packages → the package → Package
+settings → Change visibility. Any cluster can then pull it with no setup.
+The repository stays private; only the image becomes readable, which does
+publish the collection scripts, since they are in the image layers.
+
+**Or build straight into the cluster's own registry**, which needs no GitHub
+credentials and no external pull at all:
+
+```console
+$ oc new-project better-gather-build
+$ oc new-build --name mg --binary --strategy=docker
+$ oc start-build mg --from-dir=. --follow
+$ oc adm must-gather \
+    --run-namespace better-gather-build \
+    --image=image-registry.openshift-image-registry.svc:5000/better-gather-build/mg:latest
+```
+
+This is how the changes here were tested; see also `hack/try-on-cluster.sh`,
+which needs neither a build nor a registry.
+
+## Release branches
+
+`release-4.18` through `release-4.22`. Upstream has no `release-4.23` —
+it goes straight from 4.22 to 5.0 — so there is nothing to backport onto.
+
+On each branch, 7 of the 9 `oc rsync` calls in `gather_ceph_logs` become
+bounded copies; the two that remain are the journal and kernel `.gz` files,
+already bounded by `journalctl --since` and single files besides. 40 tests
+pass on every branch.
+
+## Staying current with upstream
+
+A scheduled workflow (`.github/workflows/sync-upstream.yml`) fetches
+[red-hat-storage/odf-must-gather](https://github.com/red-hat-storage/odf-must-gather)
+daily and:
+
+- opens a sync PR when `main` lags `upstream/main`
+- opens a sync PR for each existing `release-*` that lags its upstream twin
+  (full re-apply of --since, UBI9 base, and disclaimer — not a cherry-pick)
+- publishes a new `release-X.Y` when upstream adds one at or above this fork's
+  floor (oldest existing `release-*`, today 4.18), after a successful full
+  backport — never a bare upstream push
+
+Sync PRs are labeled `upstream-sync` and wait for CI; they are not auto-merged.
+Run the same logic locally with:
+
+```console
+$ hack/sync-upstream.sh           # needs gh, a clean tree, and push access
+$ hack/sync-upstream.sh --dry-run
+```
+
+---
+
 ODF must-gather
 =================
 

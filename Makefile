@@ -49,3 +49,97 @@ else
 	@make docker-engine-build
 endif
 
+
+# ---------------------------------------------------------------------------
+# better-gather-odf additions
+# ---------------------------------------------------------------------------
+
+LOCALBIN ?= $(shell pwd)/tmp/bin
+BATS ?= $(LOCALBIN)/bats
+SHELLCHECK ?= $(LOCALBIN)/shellcheck
+TRIVY ?= $(LOCALBIN)/trivy
+SHFMT ?= $(LOCALBIN)/shfmt
+SCRIPT_DIRS := collection-scripts/ hack/ tests/
+
+# BASE has no default on purpose. This image adds only shell scripts, so all
+# of its CVE exposure comes from whatever it is layered on; the supported ODF
+# image needs a subscription and the community one was built in July last
+# year. Pass the image your cluster advertises, or build a current one with
+# image-base.
+BASE ?=
+OVERLAY_IMAGE ?= better-gather-odf:latest
+BASE_IMAGE ?= better-gather-odf-base:latest
+MAX_BASE_AGE_DAYS ?= 60
+
+.PHONY: tools-from-packages
+tools-from-packages:
+	./hack/tools-from-packages.sh
+
+$(LOCALBIN)/%:
+	./hack/tools-from-packages.sh $*
+
+.PHONY: bats-test
+bats-test: $(BATS)
+	$(BATS) tests/*.bats
+
+.PHONY: bats-lint
+bats-lint: $(SHELLCHECK)
+	find $(SCRIPT_DIRS) -type f -not -path '*/vendor/*' \
+		-exec grep -Eq '^#!.*/(env +)?(ba|da|k|z)?sh\b' {} \; -exec $(SHELLCHECK) -x {} +
+
+# Does not collide with upstream's targets or with build-machinery-go's
+# `test`, which attaches test-unit and hard-requires a Go toolchain.
+.PHONY: bats-check
+bats-check: bats-lint bats-test
+
+# Security scanning. Reporting only -- nothing here fails a build, by
+# design: an unfixed CVE in the base is not something this repo can action,
+# and a gate that cannot be satisfied just gets ignored. CI runs the same two
+# scans and keeps the reports as artifacts.
+#
+#   hack/tools-from-packages.sh trivy     # not in the default tool set
+#
+# vendor/ is skipped: it is third-party code this repo does not build, and it
+# carries Kubernetes test fixtures that trip every pod-security rule. Module
+# vulnerabilities are still found, because those come from go.mod rather than
+# from the vendored sources.
+SCAN_SEVERITY ?= HIGH,CRITICAL
+
+.PHONY: scan-code
+scan-code:
+	@test -x "$(TRIVY)" || { echo "run: ./hack/tools-from-packages.sh trivy"; exit 2; }
+	$(TRIVY) filesystem --scanners vuln,secret,misconfig \
+		--skip-dirs '**/vendor' \
+		--severity $(SCAN_SEVERITY) --exit-code 0 .
+
+# Via a saved archive rather than the image store: rootless podman has no
+# socket for trivy to talk to unless podman.socket happens to be running, and
+# --input works the same everywhere.
+.PHONY: scan-image
+scan-image:
+	@test -x "$(TRIVY)" || { echo "run: ./hack/tools-from-packages.sh trivy"; exit 2; }
+	@set -e; \
+	tmpdir="$$(mktemp -d)"; \
+	trap 'rm -rf "$$tmpdir"' EXIT; \
+	podman save --format docker-archive -o "$$tmpdir/image.tar" $(OVERLAY_IMAGE); \
+	$(TRIVY) image --input "$$tmpdir/image.tar" --scanners vuln \
+		--severity $(SCAN_SEVERITY) --exit-code 0
+
+.PHONY: scan
+scan: scan-code scan-image
+
+.PHONY: image-base
+image-base:
+	podman build -t $(BASE_IMAGE) -f Dockerfile.base .
+
+.PHONY: check-base
+check-base:
+	@test -n "$(BASE)" || { echo "set BASE to the image your cluster advertises, or build one with make image-base"; exit 2; }
+	./hack/check-base.sh --max-age $(MAX_BASE_AGE_DAYS) $(BASE)
+
+.PHONY: image-overlay
+image-overlay:
+	@test -n "$(BASE)" || { echo "set BASE to the image your cluster advertises, or build one with make image-base"; exit 2; }
+	podman build --build-arg BASE=$(BASE) \
+		--build-arg BASE_BUILT="$$(./hack/check-base.sh --warn-only $(BASE) 2>/dev/null | sed -n 's/^built: \([0-9-]*\).*/\1/p' | grep . || echo unknown)" \
+		-t $(OVERLAY_IMAGE) -f Dockerfile.overlay .
